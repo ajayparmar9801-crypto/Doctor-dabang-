@@ -8,6 +8,7 @@ import {
   GoogleGenAI,
   Modality,
   ThinkingLevel,
+  Type,
   type LiveServerMessage,
 } from '@google/genai';
 
@@ -132,6 +133,351 @@ async function startServer() {
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, service: 'doctor-dubang' });
+  });
+
+  app.get('/api/maps/config', (_req, res) => {
+    const mapsApiKey =
+      process.env.VITE_GOOGLE_MAPS_API_KEY ||
+      process.env.GOOGLE_MAPS_API_KEY ||
+      '';
+    res.json({ mapsApiKey });
+  });
+
+  app.post('/api/hospitals/nearby', async (req, res) => {
+    try {
+      const apiKey =
+        process.env.GOOGLE_MAPS_API_KEY ||
+        process.env.VITE_GOOGLE_MAPS_API_KEY ||
+        '';
+      if (!apiKey) {
+        res.status(503).json({
+          error: 'Google Maps API key is not configured on the server.',
+        });
+        return;
+      }
+
+      const {
+        lat,
+        lng,
+        radius = 8000,
+        language = 'en',
+      } = req.body as {
+        lat?: number;
+        lng?: number;
+        radius?: number;
+        language?: SupportedLanguage;
+      };
+
+      if (typeof lat !== 'number' || typeof lng !== 'number') {
+        res.status(400).json({ error: 'Valid latitude and longitude are required.' });
+        return;
+      }
+
+      const fieldMask = [
+        'places.id',
+        'places.displayName',
+        'places.formattedAddress',
+        'places.location',
+        'places.nationalPhoneNumber',
+        'places.internationalPhoneNumber',
+        'places.googleMapsUri',
+        'places.primaryType',
+        'places.currentOpeningHours',
+      ].join(',');
+
+      const response = await fetch(
+        'https://places.googleapis.com/v1/places:searchNearby',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Goog-Api-Key': apiKey,
+            'X-Goog-Maps-Solution-ID': 'gmp_mcp_codeassist_v1_aistudio',
+            'X-Goog-FieldMask': fieldMask,
+          },
+          body: JSON.stringify({
+            includedTypes: ['hospital', 'doctor'],
+            maxResultCount: 12,
+            rankPreference: 'DISTANCE',
+            languageCode: language,
+            locationRestriction: {
+              circle: {
+                center: { latitude: lat, longitude: lng },
+                radius: Math.min(Math.max(Number(radius) || 8000, 500), 50000),
+              },
+            },
+          }),
+        }
+      );
+
+      const data = (await response.json()) as {
+        places?: Array<{
+          id?: string;
+          displayName?: { text?: string };
+          formattedAddress?: string;
+          location?: { latitude?: number; longitude?: number };
+          nationalPhoneNumber?: string;
+          internationalPhoneNumber?: string;
+          googleMapsUri?: string;
+          primaryType?: string;
+          currentOpeningHours?: { openNow?: boolean };
+        }>;
+        error?: { status?: string; message?: string };
+      };
+
+      if (
+        response.status === 429 ||
+        data.error?.status === 'RESOURCE_EXHAUSTED'
+      ) {
+        res.status(429).json({
+          quotaExceeded: true,
+          error: data.error?.message || 'Google Maps Platform quota exceeded.',
+        });
+        return;
+      }
+
+      if (!response.ok) {
+        res.status(response.status).json({
+          error: data.error?.message || 'Failed to fetch nearby Google hospitals.',
+        });
+        return;
+      }
+
+      const hospitals = (data.places || [])
+        .filter((p) => p.location?.latitude !== undefined && p.location?.longitude !== undefined)
+        .map((p) => ({
+          id: p.id || `g-${Math.random().toString(36).slice(2, 10)}`,
+          placeId: p.id || '',
+          name: p.displayName?.text || 'Hospital',
+          category: p.primaryType === 'hospital' ? 'hospital' : 'health_center',
+          address: p.formattedAddress || 'Address unavailable',
+          phone: p.nationalPhoneNumber || p.internationalPhoneNumber || '',
+          lat: p.location!.latitude!,
+          lng: p.location!.longitude!,
+          emergency24x7: p.primaryType === 'hospital',
+          ambulanceAvailable: p.primaryType === 'hospital',
+          icuBedsAvailable: 0,
+          verified: false,
+          googleMapsUri: p.googleMapsUri || '',
+          source: 'google' as const,
+          isOpenNow: p.currentOpeningHours?.openNow,
+        }));
+
+      res.json({ hospitals });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Unable to fetch nearby hospitals.',
+      });
+    }
+  });
+
+  app.post('/api/hospitals/search', async (req, res) => {
+    try {
+      const apiKey =
+        process.env.GOOGLE_MAPS_API_KEY ||
+        process.env.VITE_GOOGLE_MAPS_API_KEY ||
+        '';
+      if (!apiKey) {
+        res.status(503).json({
+          error: 'Google Maps API key is not configured on the server.',
+        });
+        return;
+      }
+
+      const { query, lat, lng, language = 'en' } = req.body as {
+        query?: string;
+        lat?: number;
+        lng?: number;
+        language?: SupportedLanguage;
+      };
+
+      if (!query || !query.trim()) {
+        res.status(400).json({ error: 'Search query is required.' });
+        return;
+      }
+
+      const fieldMask = [
+        'places.id',
+        'places.displayName',
+        'places.formattedAddress',
+        'places.location',
+        'places.nationalPhoneNumber',
+        'places.internationalPhoneNumber',
+        'places.googleMapsUri',
+        'places.primaryType',
+        'places.currentOpeningHours',
+      ].join(',');
+
+      const bodyPayload: Record<string, unknown> = {
+        textQuery: `${query.trim()} hospital emergency health center`,
+        pageSize: 10,
+        languageCode: language,
+      };
+
+      if (typeof lat === 'number' && typeof lng === 'number') {
+        bodyPayload.locationBias = {
+          circle: {
+            center: { latitude: lat, longitude: lng },
+            radius: 25000.0,
+          },
+        };
+      }
+
+      const response = await fetch(
+        'https://places.googleapis.com/v1/places:searchText',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Goog-Api-Key': apiKey,
+            'X-Goog-Maps-Solution-ID': 'gmp_mcp_codeassist_v1_aistudio',
+            'X-Goog-FieldMask': fieldMask,
+          },
+          body: JSON.stringify(bodyPayload),
+        }
+      );
+
+      const data = (await response.json()) as {
+        places?: Array<{
+          id?: string;
+          displayName?: { text?: string };
+          formattedAddress?: string;
+          location?: { latitude?: number; longitude?: number };
+          nationalPhoneNumber?: string;
+          internationalPhoneNumber?: string;
+          googleMapsUri?: string;
+          primaryType?: string;
+          currentOpeningHours?: { openNow?: boolean };
+        }>;
+        error?: { status?: string; message?: string };
+      };
+
+      if (
+        response.status === 429 ||
+        data.error?.status === 'RESOURCE_EXHAUSTED'
+      ) {
+        res.status(429).json({
+          quotaExceeded: true,
+          error: data.error?.message || 'Google Maps Platform quota exceeded.',
+        });
+        return;
+      }
+
+      if (!response.ok) {
+        res.status(response.status).json({
+          error: data.error?.message || 'Google Places search failed.',
+        });
+        return;
+      }
+
+      const hospitals = (data.places || [])
+        .filter((p) => p.location?.latitude !== undefined && p.location?.longitude !== undefined)
+        .map((p) => ({
+          id: p.id || `g-${Math.random().toString(36).slice(2, 10)}`,
+          placeId: p.id || '',
+          name: p.displayName?.text || 'Hospital',
+          category: p.primaryType === 'hospital' ? 'hospital' : 'health_center',
+          address: p.formattedAddress || 'Address unavailable',
+          phone: p.nationalPhoneNumber || p.internationalPhoneNumber || '',
+          lat: p.location!.latitude!,
+          lng: p.location!.longitude!,
+          emergency24x7: p.primaryType === 'hospital',
+          ambulanceAvailable: p.primaryType === 'hospital',
+          icuBedsAvailable: 0,
+          verified: false,
+          googleMapsUri: p.googleMapsUri || '',
+          source: 'google' as const,
+          isOpenNow: p.currentOpeningHours?.openNow,
+        }));
+
+      res.json({ hospitals });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Unable to search hospitals.',
+      });
+    }
+  });
+
+  app.post('/api/emergency/ai-inform', async (req, res) => {
+    try {
+      const {
+        language = 'gu',
+        medicalId,
+        location,
+        symptomSummary,
+        targetHospital,
+      } = req.body as {
+        language?: SupportedLanguage;
+        medicalId?: MedicalIdPayload;
+        location?: { lat?: number; lng?: number };
+        symptomSummary?: string;
+        targetHospital?: { name?: string; phone?: string; address?: string };
+      };
+
+      const ai = getAiClient();
+      const langName = getLanguageName(language);
+      const gpsUrl =
+        typeof location?.lat === 'number' && typeof location?.lng === 'number'
+          ? `https://www.google.com/maps?q=${location.lat.toFixed(6)},${location.lng.toFixed(6)}`
+          : 'GPS not locked';
+
+      const prompt = [
+        `Compose an emergency hospital pre-arrival notification brief to help save a patient.`,
+        `Target Hospital/Health Center: ${targetHospital?.name || 'Nearest Emergency Hospital'} (${targetHospital?.address || ''})`,
+        `Patient Name: ${medicalId?.name || 'Unknown Patient'}`,
+        `Blood Group: ${medicalId?.bloodGroup || 'Unknown'}`,
+        `Allergies / Chronic Conditions: ${medicalId?.allergies || 'None reported'}`,
+        `Emergency Contact: ${medicalId?.emergencyContact || 'Not provided'}`,
+        `Reported Emergency / Symptoms: ${symptomSummary || 'Urgent medical SOS triggered'}`,
+        `Live GPS Link: ${gpsUrl}`,
+        `Write the brief clearly in ${langName} (and include key clinical labels so ER/paramedic staff understand immediately). Keep it under 120 words, structured and urgent.`,
+      ].join('\n');
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: prompt,
+        config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              dispatchBrief: {
+                type: Type.STRING,
+                description: 'Concise emergency pre-arrival hospital notification brief.',
+              },
+              urgencyLevel: {
+                type: Type.STRING,
+                description: 'One of: critical, high, moderate',
+              },
+            },
+            required: ['dispatchBrief', 'urgencyLevel'],
+          },
+        },
+      });
+
+      const raw = (response.text || '{}').trim();
+      const parsed = JSON.parse(raw) as {
+        dispatchBrief?: string;
+        urgencyLevel?: string;
+      };
+      const urgency =
+        parsed.urgencyLevel === 'critical' ||
+        parsed.urgencyLevel === 'high' ||
+        parsed.urgencyLevel === 'moderate'
+          ? parsed.urgencyLevel
+          : 'critical';
+
+      res.json({
+        dispatchBrief:
+          parsed.dispatchBrief ||
+          `EMERGENCY ALERT for ${targetHospital?.name || 'Hospital'}: ${symptomSummary || 'Urgent SOS'}. GPS: ${gpsUrl}`,
+        urgencyLevel: urgency,
+      });
+    } catch (err) {
+      const parsed = extractGeminiError(err);
+      res.status(parsed.status).json({ error: parsed.message });
+    }
   });
 
   app.post('/api/first-aid/chat', async (req, res) => {

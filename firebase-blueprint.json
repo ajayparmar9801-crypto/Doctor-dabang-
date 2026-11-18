@@ -1,0 +1,274 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user account and role record.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 256
+        },
+        "displayName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "role": {
+          "type": "string",
+          "enum": ["user", "admin"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "displayName", "role", "createdAt", "updatedAt"]
+    },
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Explicit admin allowlist document keyed by UID.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 256
+        },
+        "grantedBy": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "grantedBy", "createdAt"]
+    },
+    "Hospital": {
+      "title": "Hospital",
+      "description": "Verified hospital or emergency health center curated in the Admin Panel.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "placeId": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "category": {
+          "type": "string",
+          "enum": ["hospital", "health_center", "trauma_center", "clinic"]
+        },
+        "address": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "phone": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "lat": {
+          "type": "number"
+        },
+        "lng": {
+          "type": "number"
+        },
+        "emergency24x7": {
+          "type": "boolean"
+        },
+        "ambulanceAvailable": {
+          "type": "boolean"
+        },
+        "icuBedsAvailable": {
+          "type": "integer"
+        },
+        "verified": {
+          "type": "boolean"
+        },
+        "googleMapsUri": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "createdBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "category",
+        "address",
+        "phone",
+        "lat",
+        "lng",
+        "emergency24x7",
+        "ambulanceAvailable",
+        "icuBedsAvailable",
+        "verified",
+        "createdBy",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "EmergencyDispatch": {
+      "title": "EmergencyDispatch",
+      "description": "AI-composed emergency hospital notification & dispatch log.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "patientName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "bloodGroup": {
+          "type": "string",
+          "maxLength": 16
+        },
+        "allergies": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "emergencyContact": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "symptomSummary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "aiDispatchBrief": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "urgencyLevel": {
+          "type": "string",
+          "enum": ["critical", "high", "moderate"]
+        },
+        "hospitalId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "hospitalName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "hospitalPhone": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "lat": {
+          "type": "number"
+        },
+        "lng": {
+          "type": "number"
+        },
+        "language": {
+          "type": "string",
+          "enum": ["gu", "hi", "en", "es"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["sent", "acknowledged", "ambulance_dispatched", "resolved"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "userId",
+        "patientName",
+        "bloodGroup",
+        "allergies",
+        "emergencyContact",
+        "symptomSummary",
+        "aiDispatchBrief",
+        "urgencyLevel",
+        "hospitalId",
+        "hospitalName",
+        "hospitalPhone",
+        "lat",
+        "lng",
+        "language",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User profile records with strict PII isolation and non-escalatable role."
+    },
+    "/admins/{userId}": {
+      "schema": { "$ref": "#/entities/AdminRecord" },
+      "description": "Admin role records managed exclusively by existing admins."
+    },
+    "/hospitals/{hospitalId}": {
+      "schema": { "$ref": "#/entities/Hospital" },
+      "description": "Verified hospitals and health centers managed in the Admin Panel."
+    },
+    "/emergencyDispatches/{dispatchId}": {
+      "schema": { "$ref": "#/entities/EmergencyDispatch" },
+      "description": "AI emergency hospital notification logs created by verified users and managed by admins."
+    }
+  }
+}

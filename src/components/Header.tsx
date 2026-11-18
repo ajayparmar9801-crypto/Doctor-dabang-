@@ -5,42 +5,72 @@ import type { TranslationBundle } from '../i18n/translations';
 interface HeaderProps {
   language: Language;
   onLanguageChange: (lang: Language) => void;
+  activeView: 'home' | 'admin';
+  onNavigateView: (view: 'home' | 'admin', sectionId?: string) => void;
   t: TranslationBundle;
 }
 
-export function Header({ language, onLanguageChange, t }: HeaderProps) {
+export function Header({
+  language,
+  onLanguageChange,
+  activeView,
+  onNavigateView,
+  t,
+}: HeaderProps) {
   return (
     <header className="sticky top-0 z-40 h-14 bg-red-700 text-white border-b border-red-800">
       <div className="max-w-6xl mx-auto h-full px-4 sm:px-6 flex items-center justify-between gap-4 sm:gap-8">
-        <a
-          href="#sos-section"
-          className="flex items-center gap-2.5 font-display font-bold text-lg tracking-tight whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white rounded"
+        <button
+          type="button"
+          onClick={() => onNavigateView('home', 'sos-section')}
+          className="flex items-center gap-2.5 font-display font-bold text-lg tracking-tight whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white rounded"
         >
           <span className="w-7 h-7 rounded-lg bg-white text-red-700 flex items-center justify-center shrink-0">
             <Cross className="w-4 h-4 stroke-[2.75]" aria-hidden="true" />
           </span>
           <span>Doctor Dubang</span>
-        </a>
+        </button>
 
         <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-red-100">
-          <a
-            href="#sos-section"
-            className="hover:text-white transition-colors whitespace-nowrap shrink-0"
+          <button
+            type="button"
+            onClick={() => onNavigateView('home', 'sos-section')}
+            className={`hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              activeView === 'home' ? 'text-white underline underline-offset-4' : ''
+            }`}
           >
             {t.navSos}
-          </a>
-          <a
-            href="#doctor-section"
-            className="hover:text-white transition-colors whitespace-nowrap shrink-0"
+          </button>
+          <button
+            type="button"
+            onClick={() => onNavigateView('home', 'hospitals-section')}
+            className="hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            {t.navHospitals}
+          </button>
+          <button
+            type="button"
+            onClick={() => onNavigateView('home', 'doctor-section')}
+            className="hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             {t.navDoctor}
-          </a>
-          <a
-            href="#medical-id-section"
-            className="hover:text-white transition-colors whitespace-nowrap shrink-0"
+          </button>
+          <button
+            type="button"
+            onClick={() => onNavigateView('home', 'medical-id-section')}
+            className="hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             {t.navMedicalId}
-          </a>
+          </button>
+          <button
+            type="button"
+            onClick={() => onNavigateView('admin')}
+            className={`hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              activeView === 'admin' ? 'text-white underline underline-offset-4' : ''
+            }`}
+          >
+            {t.navAdmin}
+          </button>
         </nav>
 
         <div className="flex items-center gap-2 shrink-0">

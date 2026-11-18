@@ -1,12 +1,34 @@
 import { useEffect, useState } from 'react';
 import { ShieldAlert } from 'lucide-react';
+import { onAuthStateChanged, type User } from 'firebase/auth';
+import {
+  collection,
+  doc,
+  getDoc,
+  onSnapshot,
+  query,
+  serverTimestamp,
+  setDoc,
+  where,
+} from 'firebase/firestore';
+import {
+  auth,
+  BOOTSTRAPPED_ADMIN_EMAIL,
+  db,
+  handleFirestoreError,
+  OperationType,
+} from './firebase';
 import { Header } from './components/Header';
+import { AllFeaturesGrid, type FeatureActionId } from './components/AllFeaturesGrid';
 import { EmergencySosPanel } from './components/EmergencySosPanel';
 import { DoctorDubangAssistant } from './components/DoctorDubangAssistant';
 import { MedicalIdCard } from './components/MedicalIdCard';
+import { GoogleHospitalsMap } from './components/GoogleHospitalsMap';
+import { AdminPanel } from './components/AdminPanel';
 import { MobileBottomBar } from './components/MobileBottomBar';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { TRANSLATIONS } from './i18n/translations';
-import type { GeoLocationState, Language, MedicalID } from './types';
+import type { GeoLocationState, HospitalItem, Language, MedicalID } from './types';
 
 const MEDICAL_ID_STORAGE_KEY = 'doctor_dubang_medical_id_v1';
 const LANGUAGE_STORAGE_KEY = 'doctor_dubang_lang_v1';
@@ -51,8 +73,26 @@ export default function App() {
   const [language, setLanguage] = useState<Language>(loadInitialLanguage);
   const [medicalId, setMedicalId] = useState<MedicalID>(loadInitialMedicalId);
   const [location, setLocation] = useState<GeoLocationState>({ status: 'idle' });
+  const [activeView, setActiveView] = useState<'home' | 'admin'>('home');
+  const [autoInformTriggerCount, setAutoInformTriggerCount] = useState(0);
+
+  // Firebase Auth & RBAC state
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  // Admin-verified hospitals from Firestore
+  const [verifiedHospitals, setVerifiedHospitals] = useState<HospitalItem[]>([]);
+
+  // Google Maps Platform Demo Key Quota Banner State (Case A)
+  const [mapsQuotaExceeded, setMapsQuotaExceeded] = useState(false);
 
   const t = TRANSLATIONS[language];
+
+  useEffect(() => {
+    const onQuotaExceeded = () => setMapsQuotaExceeded(true);
+    window.addEventListener('gmp-quota-exceeded', onQuotaExceeded);
+    return () => window.removeEventListener('gmp-quota-exceeded', onQuotaExceeded);
+  }, []);
 
   useEffect(() => {
     document.documentElement.lang = language;
@@ -62,6 +102,72 @@ export default function App() {
       // Ignore storage error
     }
   }, [language]);
+
+  // Firebase Auth listener & User/Admin synchronization
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      setCurrentUser(user);
+      if (!user || !user.emailVerified) {
+        setIsAdmin(false);
+        return;
+      }
+
+      const isBootstrapped = user.email === BOOTSTRAPPED_ADMIN_EMAIL;
+      let hasAdminDoc = false;
+      try {
+        const adminSnap = await getDoc(doc(db, 'admins', user.uid));
+        hasAdminDoc = adminSnap.exists();
+      } catch {
+        hasAdminDoc = false;
+      }
+
+      setIsAdmin(isBootstrapped || hasAdminDoc);
+
+      const userPath = `users/${user.uid}`;
+      try {
+        const userRef = doc(db, 'users', user.uid);
+        const existingSnap = await getDoc(userRef);
+        if (!existingSnap.exists()) {
+          await setDoc(userRef, {
+            uid: user.uid,
+            email: (user.email || '').slice(0, 256),
+            displayName: (user.displayName || 'User').slice(0, 120),
+            role: isBootstrapped ? 'admin' : 'user',
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, userPath);
+      }
+    });
+
+    return () => unsub();
+  }, []);
+
+  // Verified hospitals listener (public read when verified == true)
+  useEffect(() => {
+    const q = query(
+      collection(db, 'hospitals'),
+      where('verified', '==', true)
+    );
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const list: HospitalItem[] = [];
+        snap.forEach((docSnap) => {
+          const data = docSnap.data() as Omit<HospitalItem, 'source'>;
+          list.push({ ...data, source: 'admin' });
+        });
+        setVerifiedHospitals(list);
+      },
+      (err) => {
+        handleFirestoreError(err, OperationType.LIST, 'hospitals');
+      }
+    );
+
+    return () => unsub();
+  }, []);
 
   const handleSaveMedicalId = (updated: MedicalID) => {
     setMedicalId(updated);
@@ -109,60 +215,157 @@ export default function App() {
     );
   };
 
+  const navigateView = (view: 'home' | 'admin', sectionId?: string) => {
+    setActiveView(view);
+    if (view === 'home' && sectionId) {
+      setTimeout(() => {
+        document.getElementById(sectionId)?.scrollIntoView({ behavior: 'smooth' });
+      }, 60);
+    } else {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  };
+
+  const handleSelectFeature = (id: FeatureActionId) => {
+    if (id === 'admin') {
+      navigateView('admin');
+      return;
+    }
+    if (id === 'sos') {
+      handleTriggerSOS();
+      navigateView('home', 'sos-section');
+      return;
+    }
+    if (id === 'doctor') {
+      navigateView('home', 'doctor-section');
+      return;
+    }
+    if (id === 'hospitals') {
+      if (location.status === 'idle') handleTriggerSOS();
+      navigateView('home', 'hospitals-section');
+      return;
+    }
+    if (id === 'ai-inform') {
+      if (location.status === 'idle') handleTriggerSOS();
+      setAutoInformTriggerCount((c) => c + 1);
+      navigateView('home', 'hospitals-section');
+      return;
+    }
+    if (id === 'medical-id') {
+      navigateView('home', 'medical-id-section');
+    }
+  };
+
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col pb-20 md:pb-8">
-      <Header language={language} onLanguageChange={setLanguage} t={t} />
-
-      <main className="flex-1 w-full max-w-6xl mx-auto px-4 sm:px-6 py-5 sm:py-8">
-        <div className="mb-5 sm:mb-6">
-          <h1 className="font-display text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight text-balance">
-            Doctor Dubang
-          </h1>
-          <p className="text-sm text-slate-600 mt-1">{t.subtitle}</p>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-          <div className="lg:col-span-5 space-y-6">
-            <EmergencySosPanel
-              location={location}
-              onTriggerSOS={handleTriggerSOS}
-              medicalId={medicalId}
-              t={t}
-            />
-            <MedicalIdCard
-              medicalId={medicalId}
-              onSave={handleSaveMedicalId}
-              t={t}
-            />
+    <ErrorBoundary>
+      <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col pb-20 md:pb-8">
+        {mapsQuotaExceeded && (
+          <div className="bg-amber-50 border-b border-amber-200 text-amber-900 px-4 py-2.5 text-xs md:text-sm text-center sticky top-0 z-50 shadow-sm">
+            <span>
+              Google Maps Platform quota reached. If you are the app owner, visit{' '}
+              <a
+                href="https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline font-semibold text-amber-950 hover:text-amber-800"
+              >
+                maps developer site
+              </a>{' '}
+              for instructions to update your account.
+            </span>
           </div>
+        )}
 
-          <div className="lg:col-span-7 space-y-6">
-            <DoctorDubangAssistant
+        <Header
+          language={language}
+          onLanguageChange={setLanguage}
+          activeView={activeView}
+          onNavigateView={navigateView}
+          t={t}
+        />
+
+        <main className="flex-1 w-full max-w-6xl mx-auto px-4 sm:px-6 py-5 sm:py-8">
+          {activeView === 'admin' ? (
+            <AdminPanel
+              currentUser={currentUser}
+              isAdmin={isAdmin}
               language={language}
-              medicalId={medicalId}
-              location={location}
+              onBackHome={() => navigateView('home')}
               t={t}
             />
+          ) : (
+            <>
+              <div className="mb-5 sm:mb-6">
+                <h1 className="font-display text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight text-balance">
+                  Doctor Dubang
+                </h1>
+                <p className="text-sm text-slate-600 mt-1">{t.subtitle}</p>
+              </div>
 
-            <footer className="bg-amber-50 border border-amber-200 rounded-2xl p-4 sm:p-5 text-xs text-amber-950 leading-relaxed">
-              <div className="flex items-start gap-2.5">
-                <ShieldAlert
-                  className="w-4 h-4 text-amber-700 mt-0.5 shrink-0"
-                  aria-hidden="true"
-                />
-                <div>
-                  <p className="font-semibold text-amber-900 mb-1">
-                    {t.disclaimerTitle}
-                  </p>
-                  <p>{t.disclaimerBody}</p>
+              <AllFeaturesGrid t={t} onSelectFeature={handleSelectFeature} />
+
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                <div className="lg:col-span-5 space-y-6">
+                  <EmergencySosPanel
+                    location={location}
+                    onTriggerSOS={handleTriggerSOS}
+                    medicalId={medicalId}
+                    t={t}
+                  />
+                  <MedicalIdCard
+                    medicalId={medicalId}
+                    onSave={handleSaveMedicalId}
+                    t={t}
+                  />
+                </div>
+
+                <div className="lg:col-span-7 space-y-6">
+                  <DoctorDubangAssistant
+                    language={language}
+                    medicalId={medicalId}
+                    location={location}
+                    t={t}
+                  />
                 </div>
               </div>
-            </footer>
-          </div>
-        </div>
-      </main>
 
-      <MobileBottomBar t={t} />
-    </div>
+              <div className="mt-6">
+                <GoogleHospitalsMap
+                  language={language}
+                  location={location}
+                  onRequestGps={handleTriggerSOS}
+                  medicalId={medicalId}
+                  verifiedHospitals={verifiedHospitals}
+                  currentUser={currentUser}
+                  autoInformTriggerCount={autoInformTriggerCount}
+                  t={t}
+                />
+              </div>
+
+              <footer className="mt-6 bg-amber-50 border border-amber-200 rounded-2xl p-4 sm:p-5 text-xs text-amber-950 leading-relaxed">
+                <div className="flex items-start gap-2.5">
+                  <ShieldAlert
+                    className="w-4 h-4 text-amber-700 mt-0.5 shrink-0"
+                    aria-hidden="true"
+                  />
+                  <div>
+                    <p className="font-semibold text-amber-900 mb-1">
+                      {t.disclaimerTitle}
+                    </p>
+                    <p>{t.disclaimerBody}</p>
+                  </div>
+                </div>
+              </footer>
+            </>
+          )}
+        </main>
+
+        <MobileBottomBar
+          activeView={activeView}
+          onNavigateView={navigateView}
+          t={t}
+        />
+      </div>
+    </ErrorBoundary>
   );
 }
