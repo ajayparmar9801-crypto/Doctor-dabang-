@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ShieldAlert } from 'lucide-react';
+import { AlertTriangle, ShieldAlert } from 'lucide-react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import {
   collection,
@@ -28,6 +28,7 @@ import { AdminPanel } from './components/AdminPanel';
 import { MobileBottomBar } from './components/MobileBottomBar';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { TRANSLATIONS } from './i18n/translations';
+import { initGoogleAnalytics, trackEvent, trackPageView } from './utils/analytics';
 import type { GeoLocationState, HospitalItem, Language, MedicalID } from './types';
 
 const MEDICAL_ID_STORAGE_KEY = 'doctor_dubang_medical_id_v1';
@@ -85,6 +86,7 @@ export default function App() {
 
   // Google Maps Platform Demo Key Quota Banner State (Case A)
   const [mapsQuotaExceeded, setMapsQuotaExceeded] = useState(false);
+  const [appError, setAppError] = useState<string | null>(null);
 
   const t = TRANSLATIONS[language];
 
@@ -92,6 +94,12 @@ export default function App() {
     const onQuotaExceeded = () => setMapsQuotaExceeded(true);
     window.addEventListener('gmp-quota-exceeded', onQuotaExceeded);
     return () => window.removeEventListener('gmp-quota-exceeded', onQuotaExceeded);
+  }, []);
+
+  useEffect(() => {
+    initGoogleAnalytics();
+    trackPageView('home', language);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -138,7 +146,15 @@ export default function App() {
           });
         }
       } catch (err) {
-        handleFirestoreError(err, OperationType.WRITE, userPath);
+        try {
+          handleFirestoreError(err, OperationType.WRITE, userPath);
+        } catch (formattedErr) {
+          setAppError(
+            formattedErr instanceof Error
+              ? formattedErr.message
+              : 'Unable to sync user profile.'
+          );
+        }
       }
     });
 
@@ -162,7 +178,13 @@ export default function App() {
         setVerifiedHospitals(list);
       },
       (err) => {
-        handleFirestoreError(err, OperationType.LIST, 'hospitals');
+        try {
+          handleFirestoreError(err, OperationType.LIST, 'hospitals');
+        } catch {
+          setAppError(
+            'Unable to load verified clinic directory from cloud database. Live GPS & emergency tools remain active.'
+          );
+        }
       }
     );
 
@@ -178,8 +200,18 @@ export default function App() {
     }
   };
 
+  const handleLanguageChange = (nextLang: Language) => {
+    trackEvent('language_changed', {
+      from_language: language,
+      to_language: nextLang,
+    });
+    setLanguage(nextLang);
+  };
+
   const handleTriggerSOS = () => {
+    trackEvent('sos_triggered', { app_language: language });
     if (!('geolocation' in navigator)) {
+      trackEvent('sos_location_error', { reason: 'unsupported' });
       setLocation({
         status: 'error',
         errorMessage: t.gpsErrorUnavailable,
@@ -190,15 +222,22 @@ export default function App() {
     setLocation({ status: 'fetching' });
     navigator.geolocation.getCurrentPosition(
       (pos) => {
+        const acc = pos.coords.accuracy;
+        trackEvent('sos_location_resolved', {
+          accuracy_bucket: acc <= 50 ? 'high' : acc <= 200 ? 'medium' : 'low',
+        });
         setLocation({
           status: 'ready',
           lat: pos.coords.latitude,
           lng: pos.coords.longitude,
-          accuracy: pos.coords.accuracy,
+          accuracy: acc,
           timestamp: new Date().toISOString(),
         });
       },
       (err) => {
+        const reason =
+          err.code === err.PERMISSION_DENIED ? 'permission_denied' : 'unavailable';
+        trackEvent('sos_location_error', { reason });
         setLocation({
           status: 'error',
           errorMessage:
@@ -217,6 +256,7 @@ export default function App() {
 
   const navigateView = (view: 'home' | 'admin', sectionId?: string) => {
     setActiveView(view);
+    trackPageView(view, language, sectionId);
     if (view === 'home' && sectionId) {
       setTimeout(() => {
         document.getElementById(sectionId)?.scrollIntoView({ behavior: 'smooth' });
@@ -227,6 +267,10 @@ export default function App() {
   };
 
   const handleSelectFeature = (id: FeatureActionId) => {
+    trackEvent('feature_tile_clicked', {
+      feature_id: id,
+      app_language: language,
+    });
     if (id === 'admin') {
       navigateView('admin');
       return;
@@ -278,11 +322,33 @@ export default function App() {
 
         <Header
           language={language}
-          onLanguageChange={setLanguage}
+          onLanguageChange={handleLanguageChange}
           activeView={activeView}
           onNavigateView={navigateView}
           t={t}
         />
+
+        {appError && (
+          <div
+            role="alert"
+            className="bg-red-50 border-b border-red-200 text-red-900 px-4 py-2.5 text-xs sm:text-sm"
+          >
+            <div className="max-w-6xl mx-auto flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 min-w-0">
+                <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" aria-hidden="true" />
+                <span className="truncate">{appError}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAppError(null)}
+                className="text-red-700 font-bold hover:underline shrink-0 cursor-pointer"
+                aria-label="Dismiss error"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+        )}
 
         <main className="flex-1 w-full max-w-6xl mx-auto px-4 sm:px-6 py-5 sm:py-8">
           {activeView === 'admin' ? (

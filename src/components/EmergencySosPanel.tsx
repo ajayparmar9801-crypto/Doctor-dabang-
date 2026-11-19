@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import type { GeoLocationState, MedicalID } from '../types';
 import type { TranslationBundle } from '../i18n/translations';
+import { trackEvent } from '../utils/analytics';
 
 interface EmergencySosPanelProps {
   location: GeoLocationState;
@@ -72,6 +73,7 @@ export function EmergencySosPanel({
   const handleCopySos = async () => {
     try {
       await navigator.clipboard.writeText(sosText);
+      trackEvent('sos_shared', { channel: 'copy', has_gps: hasCoords });
       setCopied(true);
       setTimeout(() => setCopied(false), 2500);
     } catch {
@@ -83,6 +85,7 @@ export function EmergencySosPanel({
     if (location.status === 'idle') {
       onTriggerSOS();
     }
+    trackEvent('sos_hospital_drawer_toggled', { has_gps: hasCoords });
     setShowHospitalPanel((prev) => !prev);
   };
 
@@ -94,6 +97,7 @@ export function EmergencySosPanel({
       <div className="grid grid-cols-2 gap-3">
         <a
           href="tel:108"
+          onClick={() => trackEvent('emergency_call_clicked', { target: '108_ambulance' })}
           className="min-h-[52px] flex items-center justify-center gap-2.5 bg-white hover:bg-red-50 border border-red-200 text-red-700 font-semibold text-sm px-4 py-3 rounded-2xl shadow-sm active:scale-[0.98] transition-all focus-visible:outline-2 focus-visible:outline-red-600"
         >
           <Ambulance className="w-5 h-5 shrink-0 text-red-600" aria-hidden="true" />
@@ -101,6 +105,7 @@ export function EmergencySosPanel({
         </a>
         <a
           href="tel:112"
+          onClick={() => trackEvent('emergency_call_clicked', { target: '112_national' })}
           className="min-h-[52px] flex items-center justify-center gap-2.5 bg-white hover:bg-blue-50 border border-blue-200 text-blue-700 font-semibold text-sm px-4 py-3 rounded-2xl shadow-sm active:scale-[0.98] transition-all focus-visible:outline-2 focus-visible:outline-blue-600"
         >
           <PhoneCall className="w-5 h-5 shrink-0 text-blue-600" aria-hidden="true" />
@@ -170,6 +175,7 @@ export function EmergencySosPanel({
                 href={whatsappUrl}
                 target="_blank"
                 rel="noopener noreferrer"
+                onClick={() => trackEvent('sos_shared', { channel: 'whatsapp', has_gps: hasCoords })}
                 className="min-h-[44px] bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-semibold py-2.5 px-3 rounded-xl flex items-center justify-center gap-2 transition-colors whitespace-nowrap"
               >
                 <Share2 className="w-4 h-4 shrink-0" aria-hidden="true" />
@@ -177,6 +183,7 @@ export function EmergencySosPanel({
               </a>
               <a
                 href={smsUrl}
+                onClick={() => trackEvent('sos_shared', { channel: 'sms', has_gps: hasCoords })}
                 className="min-h-[44px] bg-slate-900 hover:bg-slate-800 text-white text-sm font-semibold py-2.5 px-3 rounded-xl flex items-center justify-center gap-2 transition-colors whitespace-nowrap"
               >
                 <MessageSquare className="w-4 h-4 shrink-0" aria-hidden="true" />
@@ -222,6 +229,7 @@ export function EmergencySosPanel({
                 href={nearestHospitalUrl}
                 target="_blank"
                 rel="noopener noreferrer"
+                onClick={() => trackEvent('external_maps_opened', { search_type: 'emergency_hospital' })}
                 className="min-h-[44px] bg-white hover:bg-blue-50 border border-blue-200 text-blue-800 text-xs font-semibold px-3 py-2.5 rounded-lg flex items-center justify-between gap-2 transition-colors"
               >
                 <span className="truncate">{t.openMapsHospitals}</span>
@@ -231,6 +239,7 @@ export function EmergencySosPanel({
                 href={nearestAmbulanceUrl}
                 target="_blank"
                 rel="noopener noreferrer"
+                onClick={() => trackEvent('external_maps_opened', { search_type: 'ambulance_service' })}
                 className="min-h-[44px] bg-white hover:bg-blue-50 border border-blue-200 text-blue-800 text-xs font-semibold px-3 py-2.5 rounded-lg flex items-center justify-between gap-2 transition-colors"
               >
                 <span className="truncate">{t.openMapsAmbulance}</span>

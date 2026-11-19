@@ -1,21 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  APIProvider,
-  AdvancedMarker,
-  InfoWindow,
-  Map as GoogleMap,
-  Pin,
-  useAdvancedMarkerRef,
-} from '@vis.gl/react-google-maps';
-import {
+  AlertTriangle,
   Ambulance,
   CheckCircle2,
   ExternalLink,
   Hospital,
   LocateFixed,
   MessageSquare,
+  Minus,
+  Navigation,
   PhoneCall,
+  Plus,
   Radio,
+  RotateCcw,
   Search,
   Share2,
   ShieldCheck,
@@ -31,6 +28,7 @@ import type {
   UrgencyLevel,
 } from '../types';
 import type { TranslationBundle } from '../i18n/translations';
+import { trackEvent } from '../utils/analytics';
 
 interface GoogleHospitalsMapProps {
   language: Language;
@@ -43,7 +41,7 @@ interface GoogleHospitalsMapProps {
   t: TranslationBundle;
 }
 
-const DEFAULT_CENTER = { lat: 23.0225, lng: 72.5714 }; // Ahmedabad fallback center until user grants GPS or searches
+const DEFAULT_CENTER = { lat: 23.0225, lng: 72.5714 };
 
 function computeDistanceKm(
   lat1: number,
@@ -64,67 +62,6 @@ function computeDistanceKm(
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function HospitalMarker({
-  hospital,
-  isSelected,
-  onSelect,
-  onClose,
-  onAiInform,
-  t,
-}: {
-  hospital: HospitalItem;
-  isSelected: boolean;
-  onSelect: () => void;
-  onClose: () => void;
-  onAiInform: (h: HospitalItem) => void;
-  t: TranslationBundle;
-}) {
-  const [markerRef, marker] = useAdvancedMarkerRef();
-
-  return (
-    <>
-      <AdvancedMarker
-        ref={markerRef}
-        position={{ lat: hospital.lat, lng: hospital.lng }}
-        onClick={onSelect}
-        title={hospital.name}
-      >
-        <Pin
-          background={hospital.source === 'admin' ? '#dc2626' : '#1d4ed8'}
-          borderColor={hospital.source === 'admin' ? '#991b1b' : '#1e3a8a'}
-          glyphColor="#ffffff"
-          scale={isSelected ? 1.25 : 1}
-        />
-      </AdvancedMarker>
-      {isSelected && marker && (
-        <InfoWindow anchor={marker} onCloseClick={onClose} maxWidth={260}>
-          <div className="p-1 text-slate-900 space-y-1.5">
-            <p className="font-bold text-xs leading-snug">{hospital.name}</p>
-            <p className="text-[11px] text-slate-600 leading-snug">{hospital.address}</p>
-            {hospital.phone && (
-              <a
-                href={`tel:${hospital.phone}`}
-                className="inline-block text-[11px] font-mono font-semibold text-blue-700 hover:underline"
-              >
-                {hospital.phone}
-              </a>
-            )}
-            <div className="pt-1">
-              <button
-                type="button"
-                onClick={() => onAiInform(hospital)}
-                className="w-full bg-red-600 hover:bg-red-700 text-white text-[11px] font-semibold px-2.5 py-1.5 rounded-lg cursor-pointer"
-              >
-                {t.aiInformBtn}
-              </button>
-            </div>
-          </div>
-        </InfoWindow>
-      )}
-    </>
-  );
-}
-
 export function GoogleHospitalsMap({
   language,
   location,
@@ -135,14 +72,13 @@ export function GoogleHospitalsMap({
   autoInformTriggerCount,
   t,
 }: GoogleHospitalsMapProps) {
-  const envMapsKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined;
-  const [mapsApiKey, setMapsApiKey] = useState<string>(envMapsKey || '');
   const [googleHospitals, setGoogleHospitals] = useState<HospitalItem[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mapCenter, setMapCenter] = useState<{ lat: number; lng: number }>(DEFAULT_CENTER);
+  const [zoomRadiusKm, setZoomRadiusKm] = useState<number>(10);
 
   // AI Self-Inform Hospital state
   const [symptomNote, setSymptomNote] = useState('');
@@ -153,18 +89,6 @@ export function GoogleHospitalsMap({
     urgencyLevel: UrgencyLevel;
     savedToAdmin: boolean;
   } | null>(null);
-
-  useEffect(() => {
-    if (envMapsKey) return;
-    fetch('/api/maps/config')
-      .then((res) => res.json())
-      .then((data: { mapsApiKey?: string }) => {
-        if (data.mapsApiKey) setMapsApiKey(data.mapsApiKey);
-      })
-      .catch(() => {
-        // Ignore config fallback failure
-      });
-  }, [envMapsKey]);
 
   const fetchNearbyGoogleHospitals = useCallback(
     async (lat: number, lng: number) => {
@@ -186,10 +110,16 @@ export function GoogleHospitalsMap({
           throw new Error(data.error || 'Google Maps Platform quota reached.');
         }
         if (!res.ok) {
-          throw new Error(data.error || 'Failed to load Google hospital data.');
+          throw new Error(data.error || 'Failed to load nearby hospitals.');
         }
-        setGoogleHospitals(data.hospitals || []);
+        const list = data.hospitals || [];
+        setGoogleHospitals(list);
         setMapCenter({ lat, lng });
+        trackEvent('hospital_search', {
+          search_type: 'nearby_gps',
+          result_count: list.length,
+          app_language: language,
+        });
       } catch (err) {
         setErrorMsg(
           err instanceof Error ? err.message : 'Unable to fetch nearby hospitals.'
@@ -238,10 +168,15 @@ export function GoogleHospitalsMap({
         throw new Error(data.error || 'Google Maps Platform quota reached.');
       }
       if (!res.ok) {
-        throw new Error(data.error || 'Failed to search Google hospitals.');
+        throw new Error(data.error || 'Failed to search hospitals.');
       }
       const list = data.hospitals || [];
       setGoogleHospitals(list);
+      trackEvent('hospital_search', {
+        search_type: 'city_query',
+        result_count: list.length,
+        app_language: language,
+      });
       if (list[0]) {
         setMapCenter({ lat: list[0].lat, lng: list[0].lng });
         setSelectedId(list[0].id);
@@ -255,7 +190,7 @@ export function GoogleHospitalsMap({
     }
   };
 
-  // Merge Admin-verified Firestore hospitals + live Google Places hospitals
+  // Merge Admin-verified Firestore hospitals + server-fetched Google Places hospitals
   const mergedHospitals = useMemo(() => {
     const refLat = location.lat ?? mapCenter.lat;
     const refLng = location.lng ?? mapCenter.lng;
@@ -282,6 +217,29 @@ export function GoogleHospitalsMap({
     combined.sort((a, b) => (a.distanceKm ?? 999) - (b.distanceKm ?? 999));
     return combined;
   }, [verifiedHospitals, googleHospitals, location.lat, location.lng, mapCenter]);
+
+  const selectedHospital = useMemo(
+    () => mergedHospitals.find((h) => h.id === selectedId) || null,
+    [mergedHospitals, selectedId]
+  );
+
+  // Project lat/lng offsets into SVG coordinate space (600x400 viewport centered on mapCenter)
+  const projectedPins = useMemo(() => {
+    const originLat = location.status === 'ready' && location.lat !== undefined ? location.lat : mapCenter.lat;
+    const originLng = location.status === 'ready' && location.lng !== undefined ? location.lng : mapCenter.lng;
+    const cosLat = Math.max(0.2, Math.cos((originLat * Math.PI) / 180));
+    const maxRadius = Math.max(2, zoomRadiusKm);
+
+    return mergedHospitals.slice(0, 15).map((h, idx) => {
+      const dyKm = (h.lat - originLat) * 110.574;
+      const dxKm = (h.lng - originLng) * 111.32 * cosLat;
+      const normX = Math.max(-0.88, Math.min(0.88, dxKm / maxRadius));
+      const normY = Math.max(-0.82, Math.min(0.82, -dyKm / maxRadius));
+      const x = 300 + normX * 260;
+      const y = 200 + normY * 165;
+      return { hospital: h, x, y, index: idx + 1 };
+    });
+  }, [mergedHospitals, location.status, location.lat, location.lng, mapCenter, zoomRadiusKm]);
 
   const handleAiInformHospital = useCallback(
     async (target?: HospitalItem) => {
@@ -368,7 +326,11 @@ export function GoogleHospitalsMap({
             });
             savedToAdmin = true;
           } catch (fsErr) {
-            handleFirestoreError(fsErr, OperationType.CREATE, path);
+            try {
+              handleFirestoreError(fsErr, OperationType.CREATE, path);
+            } catch {
+              savedToAdmin = false;
+            }
           }
         }
 
@@ -377,6 +339,13 @@ export function GoogleHospitalsMap({
           dispatchBrief: data.dispatchBrief,
           urgencyLevel: urgency,
           savedToAdmin,
+        });
+        trackEvent('ai_hospital_inform_sent', {
+          urgency_level: urgency,
+          hospital_source: chosen.source,
+          hospital_category: chosen.category,
+          saved_to_cloud: savedToAdmin,
+          app_language: language,
         });
       } catch (err) {
         setErrorMsg(
@@ -408,6 +377,13 @@ export function GoogleHospitalsMap({
 
   const cleanPhoneForWa = (phone: string) => phone.replace(/[^0-9]/g, '');
 
+  const refCoords =
+    location.status === 'ready' && location.lat !== undefined && location.lng !== undefined
+      ? { lat: location.lat, lng: location.lng }
+      : mapCenter;
+
+  const openGoogleMapsSearchUrl = `https://www.google.com/maps/search/emergency+hospital/@${refCoords.lat},${refCoords.lng},14z`;
+
   return (
     <section
       id="hospitals-section"
@@ -425,14 +401,27 @@ export function GoogleHospitalsMap({
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={onRequestGps}
-          className="min-h-[44px] px-4 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 shrink-0 cursor-pointer transition-colors"
-        >
-          <LocateFixed className="w-4 h-4 shrink-0" aria-hidden="true" />
-          <span>{t.useMyGpsBtn}</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={onRequestGps}
+            className="min-h-[44px] px-4 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 cursor-pointer transition-colors"
+          >
+            <LocateFixed className="w-4 h-4 shrink-0" aria-hidden="true" />
+            <span>{t.useMyGpsBtn}</span>
+          </button>
+
+          <a
+            href={openGoogleMapsSearchUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="min-h-[44px] px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 border border-slate-300 text-slate-800 text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition-colors"
+          >
+            <Navigation className="w-4 h-4 text-blue-700 shrink-0" aria-hidden="true" />
+            <span>Google Maps</span>
+            <ExternalLink className="w-3.5 h-3.5 text-slate-400" aria-hidden="true" />
+          </a>
+        </div>
       </div>
 
       {/* Search & AI Self-Inform Action Bar */}
@@ -485,9 +474,23 @@ export function GoogleHospitalsMap({
         </div>
 
         {errorMsg && (
-          <p role="alert" className="text-xs font-medium text-red-700">
-            {errorMsg}
-          </p>
+          <div
+            role="alert"
+            className="rounded-xl bg-red-50 border border-red-200 px-3.5 py-2.5 text-xs font-medium text-red-800 flex items-center justify-between gap-3"
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" aria-hidden="true" />
+              <span>{errorMsg}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setErrorMsg(null)}
+              className="text-red-700 font-bold hover:underline shrink-0 cursor-pointer"
+              aria-label="Dismiss error"
+            >
+              ×
+            </button>
+          </div>
         )}
       </div>
 
@@ -560,68 +563,235 @@ export function GoogleHospitalsMap({
         </div>
       )}
 
-      {/* Map + Live Hospital List Split */}
+      {/* Interactive Private Proximity Radar + Live Hospital List Split */}
       <div className="grid grid-cols-1 lg:grid-cols-12">
-        <div className="lg:col-span-7 h-[340px] lg:h-[440px] bg-slate-100 relative">
-          {mapsApiKey ? (
-            <APIProvider
-              apiKey={mapsApiKey}
-              language={language}
-              libraries={['marker']}
-            >
-              <GoogleMap
-                defaultCenter={mapCenter}
-                center={mapCenter}
-                defaultZoom={13}
-                mapId="DEMO_MAP_ID"
-                gestureHandling="greedy"
-                internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
-                style={{ width: '100%', height: '100%' }}
-              >
-                {location.status === 'ready' &&
-                  location.lat !== undefined &&
-                  location.lng !== undefined && (
-                    <AdvancedMarker
-                      position={{ lat: location.lat, lng: location.lng }}
-                      title="Your Live GPS Location"
-                    >
-                      <Pin
-                        background="#0f172a"
-                        borderColor="#ffffff"
-                        glyphColor="#ffffff"
-                        scale={0.95}
-                      />
-                    </AdvancedMarker>
-                  )}
+        <div className="lg:col-span-7 h-[360px] lg:h-[460px] bg-slate-900 relative overflow-hidden select-none">
+          {/* Interactive Spatial Hospital Proximity Map (zero client-side API key exposure) */}
+          <svg
+            viewBox="0 0 600 400"
+            className="w-full h-full"
+            role="img"
+            aria-label="Interactive nearby hospital proximity map"
+          >
+            <defs>
+              <pattern id="gridPattern" width="40" height="40" patternUnits="userSpaceOnUse">
+                <path
+                  d="M 40 0 L 0 0 0 40"
+                  fill="none"
+                  stroke="rgba(148, 163, 184, 0.12)"
+                  strokeWidth="1"
+                />
+              </pattern>
+              <radialGradient id="radarGlow" cx="50%" cy="50%" r="50%">
+                <stop offset="0%" stopColor="rgba(16, 185, 129, 0.16)" />
+                <stop offset="100%" stopColor="rgba(15, 23, 42, 0)" />
+              </radialGradient>
+            </defs>
 
-                {mergedHospitals.map((hospital) => (
-                  <HospitalMarker
-                    key={hospital.id}
-                    hospital={hospital}
-                    isSelected={selectedId === hospital.id}
-                    onSelect={() => {
-                      setSelectedId(hospital.id);
-                      setMapCenter({ lat: hospital.lat, lng: hospital.lng });
-                    }}
-                    onClose={() => setSelectedId(null)}
-                    onAiInform={(h) => void handleAiInformHospital(h)}
-                    t={t}
+            <rect width="600" height="400" fill="#0f172a" />
+            <rect width="600" height="400" fill="url(#gridPattern)" />
+            <circle cx="300" cy="200" r="185" fill="url(#radarGlow)" />
+
+            {/* Distance Rings */}
+            <circle
+              cx="300"
+              cy="200"
+              r="55"
+              fill="none"
+              stroke="rgba(148, 163, 184, 0.22)"
+              strokeDasharray="4 4"
+            />
+            <circle
+              cx="300"
+              cy="200"
+              r="110"
+              fill="none"
+              stroke="rgba(148, 163, 184, 0.22)"
+              strokeDasharray="4 4"
+            />
+            <circle
+              cx="300"
+              cy="200"
+              r="165"
+              fill="none"
+              stroke="rgba(148, 163, 184, 0.22)"
+              strokeDasharray="4 4"
+            />
+
+            <text
+              x="306"
+              y="148"
+              fill="rgba(203, 213, 225, 0.7)"
+              fontSize="10"
+              fontFamily="monospace"
+            >
+              {(zoomRadiusKm * 0.33).toFixed(1)} km
+            </text>
+            <text
+              x="306"
+              y="93"
+              fill="rgba(203, 213, 225, 0.7)"
+              fontSize="10"
+              fontFamily="monospace"
+            >
+              {(zoomRadiusKm * 0.66).toFixed(1)} km
+            </text>
+            <text
+              x="306"
+              y="38"
+              fill="rgba(203, 213, 225, 0.7)"
+              fontSize="10"
+              fontFamily="monospace"
+            >
+              {zoomRadiusKm.toFixed(0)} km
+            </text>
+
+            {/* Origin / User GPS Marker */}
+            <g transform="translate(300, 200)">
+              <circle r="14" fill="rgba(16, 185, 129, 0.25)" />
+              <circle r="6" fill="#10b981" stroke="#ffffff" strokeWidth="2" />
+            </g>
+
+            {/* Hospital Pins */}
+            {projectedPins.map(({ hospital, x, y, index }) => {
+              const isSelected = selectedId === hospital.id;
+              const isAdmin = hospital.source === 'admin';
+              const fill = isAdmin ? '#dc2626' : '#2563eb';
+              return (
+                <g
+                  key={hospital.id}
+                  transform={`translate(${x}, ${y})`}
+                  onClick={() => {
+                    setSelectedId(hospital.id);
+                    setMapCenter({ lat: hospital.lat, lng: hospital.lng });
+                    trackEvent('hospital_selected', {
+                      hospital_source: hospital.source,
+                      hospital_category: hospital.category,
+                      via: 'map_pin',
+                    });
+                  }}
+                  className="cursor-pointer"
+                >
+                  {isSelected && (
+                    <circle
+                      r="18"
+                      fill="none"
+                      stroke="#ffffff"
+                      strokeWidth="2"
+                      strokeOpacity="0.9"
+                    />
+                  )}
+                  <circle
+                    r={isSelected ? 13 : 10}
+                    fill={fill}
+                    stroke="#ffffff"
+                    strokeWidth="2"
                   />
-                ))}
-              </GoogleMap>
-            </APIProvider>
-          ) : (
-            <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center text-slate-600 space-y-2">
-              <Hospital className="w-8 h-8 text-slate-400" aria-hidden="true" />
-              <p className="text-sm font-semibold text-slate-800">
-                {t.loadingHospitals}
-              </p>
+                  <text
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fill="#ffffff"
+                    fontSize="10"
+                    fontWeight="bold"
+                    fontFamily="sans-serif"
+                  >
+                    {index}
+                  </text>
+                </g>
+              );
+            })}
+          </svg>
+
+          {/* Top-left Coordinate & Legend Pill */}
+          <div className="absolute top-3 left-3 flex flex-wrap items-center gap-2 pointer-events-none">
+            <div className="bg-slate-950/85 backdrop-blur-xs border border-slate-700 text-slate-100 rounded-lg px-2.5 py-1.5 text-[11px] font-mono tabular-nums">
+              {refCoords.lat.toFixed(4)}, {refCoords.lng.toFixed(4)}
+            </div>
+            <div className="bg-slate-950/85 backdrop-blur-xs border border-slate-700 text-slate-200 rounded-lg px-2.5 py-1.5 text-[11px] flex items-center gap-2.5">
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-full bg-red-600 inline-block" />
+                {t.verifiedCenterLabel}
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="w-2.5 h-2.5 rounded-full bg-blue-600 inline-block" />
+                {t.googlePlacesLabel}
+              </span>
+            </div>
+          </div>
+
+          {/* Top-right Zoom Controls */}
+          <div className="absolute top-3 right-3 flex flex-col gap-1.5">
+            <button
+              type="button"
+              onClick={() => setZoomRadiusKm((r) => Math.max(2, Math.round(r / 1.5)))}
+              aria-label="Zoom in map"
+              className="w-8 h-8 rounded-lg bg-slate-950/85 border border-slate-700 text-white hover:bg-slate-800 flex items-center justify-center cursor-pointer"
+            >
+              <Plus className="w-4 h-4" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setZoomRadiusKm((r) => Math.min(40, Math.round(r * 1.5)))}
+              aria-label="Zoom out map"
+              className="w-8 h-8 rounded-lg bg-slate-950/85 border border-slate-700 text-white hover:bg-slate-800 flex items-center justify-center cursor-pointer"
+            >
+              <Minus className="w-4 h-4" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setZoomRadiusKm(10)}
+              aria-label="Reset map zoom"
+              className="w-8 h-8 rounded-lg bg-slate-950/85 border border-slate-700 text-white hover:bg-slate-800 flex items-center justify-center cursor-pointer"
+            >
+              <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
+            </button>
+          </div>
+
+          {/* Selected Hospital Floating Quick Card */}
+          {selectedHospital && (
+            <div className="absolute bottom-3 left-3 right-3 bg-white/95 backdrop-blur-xs border border-slate-200 rounded-xl p-3 shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+              <div className="min-w-0">
+                <p className="font-display font-bold text-xs sm:text-sm text-slate-900 truncate">
+                  {selectedHospital.name}
+                </p>
+                <p className="text-[11px] text-slate-600 truncate">
+                  {selectedHospital.address}
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => void handleAiInformHospital(selectedHospital)}
+                  disabled={isInforming}
+                  className="min-h-[34px] px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-semibold cursor-pointer"
+                >
+                  {t.aiInformBtn}
+                </button>
+                <a
+                  href={
+                    selectedHospital.googleMapsUri ||
+                    `https://www.google.com/maps/dir/?api=1&destination=${selectedHospital.lat},${selectedHospital.lng}`
+                  }
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="min-h-[34px] px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold inline-flex items-center gap-1"
+                >
+                  <span>{t.directionsBtn}</span>
+                  <ExternalLink className="w-3 h-3" aria-hidden="true" />
+                </a>
+              </div>
+            </div>
+          )}
+
+          {mergedHospitals.length === 0 && !isLoading && (
+            <div className="absolute inset-x-4 bottom-4 bg-slate-950/85 border border-slate-700 rounded-xl p-3 text-center text-xs text-slate-200">
+              {t.noHospitalsFound}
             </div>
           )}
         </div>
 
         {/* Scrollable Hospital Results List */}
-        <div className="lg:col-span-5 border-t lg:border-t-0 lg:border-l border-slate-200 h-[360px] lg:h-[440px] overflow-y-auto divide-y divide-slate-200">
+        <div className="lg:col-span-5 border-t lg:border-t-0 lg:border-l border-slate-200 h-[360px] lg:h-[460px] overflow-y-auto divide-y divide-slate-200">
           {isLoading ? (
             <div className="p-6 text-center text-sm text-slate-600">
               {t.loadingHospitals}
@@ -631,7 +801,7 @@ export function GoogleHospitalsMap({
               {t.noHospitalsFound}
             </div>
           ) : (
-            mergedHospitals.map((h) => {
+            mergedHospitals.map((h, idx) => {
               const selected = selectedId === h.id;
               const mapsLink =
                 h.googleMapsUri ||
@@ -650,11 +820,23 @@ export function GoogleHospitalsMap({
                       onClick={() => {
                         setSelectedId(h.id);
                         setMapCenter({ lat: h.lat, lng: h.lng });
+                        trackEvent('hospital_selected', {
+                          hospital_source: h.source,
+                          hospital_category: h.category,
+                          via: 'list_item',
+                        });
                       }}
                       className="text-left min-w-0 flex-1 cursor-pointer"
                     >
-                      <p className="font-display font-bold text-sm text-slate-900 leading-snug">
-                        {h.name}
+                      <p className="font-display font-bold text-sm text-slate-900 leading-snug flex items-center gap-2">
+                        <span
+                          className={`w-5 h-5 rounded-full text-[11px] font-bold text-white inline-flex items-center justify-center shrink-0 ${
+                            h.source === 'admin' ? 'bg-red-600' : 'bg-blue-600'
+                          }`}
+                        >
+                          {idx + 1}
+                        </span>
+                        <span className="truncate">{h.name}</span>
                       </p>
                       <p className="text-xs text-slate-500 mt-1 flex flex-wrap items-center gap-1.5">
                         {h.source === 'admin' ? (

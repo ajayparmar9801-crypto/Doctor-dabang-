@@ -40,6 +40,7 @@ import type {
   Language,
 } from '../types';
 import type { TranslationBundle } from '../i18n/translations';
+import { trackEvent } from '../utils/analytics';
 
 interface AdminPanelProps {
   currentUser: User | null;
@@ -93,6 +94,7 @@ export function AdminPanel({
   const [hospitals, setHospitals] = useState<HospitalItem[]>([]);
   const [authError, setAuthError] = useState<string | null>(null);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   // Google Places Import search inside Admin Panel
   const [googleSearch, setGoogleSearch] = useState('');
@@ -124,7 +126,11 @@ export function AdminPanel({
         setDispatches(list);
       },
       (err) => {
-        handleFirestoreError(err, OperationType.LIST, 'emergencyDispatches');
+        try {
+          handleFirestoreError(err, OperationType.LIST, 'emergencyDispatches');
+        } catch {
+          setActionError('Permission denied or failed to load live emergency dispatches.');
+        }
       }
     );
 
@@ -140,7 +146,11 @@ export function AdminPanel({
         setHospitals(list);
       },
       (err) => {
-        handleFirestoreError(err, OperationType.LIST, 'hospitals');
+        try {
+          handleFirestoreError(err, OperationType.LIST, 'hospitals');
+        } catch {
+          setActionError('Permission denied or failed to load hospital directory.');
+        }
       }
     );
 
@@ -154,6 +164,7 @@ export function AdminPanel({
     setAuthError(null);
     try {
       await signInWithPopup(auth, googleProvider);
+      trackEvent('admin_sign_in', { method: 'google' });
     } catch (err) {
       setAuthError(err instanceof Error ? err.message : 'Google sign-in failed.');
     }
@@ -168,6 +179,7 @@ export function AdminPanel({
     if (!q) return;
     setIsSearchingGoogle(true);
     setActionMsg(null);
+    setActionError(null);
     try {
       const res = await fetch('/api/hospitals/search', {
         method: 'POST',
@@ -186,7 +198,7 @@ export function AdminPanel({
       if (!res.ok) throw new Error(data.error || 'Search failed.');
       setGoogleResults(data.hospitals || []);
     } catch (err) {
-      setActionMsg(err instanceof Error ? err.message : 'Google search error.');
+      setActionError(err instanceof Error ? err.message : 'Google search error.');
     } finally {
       setIsSearchingGoogle(false);
     }
@@ -194,6 +206,7 @@ export function AdminPanel({
 
   const importGoogleHospital = async (item: HospitalItem) => {
     if (!currentUser) return;
+    setActionError(null);
     const safeId = `hosp_${(item.placeId || item.id)
       .replace(/[^a-zA-Z0-9_-]/g, '_')
       .slice(0, 80)}`;
@@ -218,8 +231,13 @@ export function AdminPanel({
         updatedAt: serverTimestamp(),
       });
       setActionMsg(`Imported "${item.name}" to verified directory.`);
+      trackEvent('admin_hospital_imported', { category: item.category });
     } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, path);
+      try {
+        handleFirestoreError(err, OperationType.WRITE, path);
+      } catch {
+        setActionError(`Failed to import "${item.name}". Verify admin permissions.`);
+      }
     }
   };
 
@@ -228,6 +246,7 @@ export function AdminPanel({
     if (!currentUser || !form.name.trim() || !form.address.trim()) return;
     setIsSavingHospital(true);
     setActionMsg(null);
+    setActionError(null);
 
     const isUpdate = Boolean(form.id);
     const targetId =
@@ -278,18 +297,28 @@ export function AdminPanel({
       }
       setForm(EMPTY_FORM);
       setActionMsg(`Saved "${form.name.trim()}" successfully.`);
+      trackEvent('admin_hospital_saved', {
+        mode: isUpdate ? 'update' : 'create',
+        category: form.category,
+        verified: form.verified,
+      });
     } catch (err) {
-      handleFirestoreError(
-        err,
-        isUpdate ? OperationType.UPDATE : OperationType.CREATE,
-        path
-      );
+      try {
+        handleFirestoreError(
+          err,
+          isUpdate ? OperationType.UPDATE : OperationType.CREATE,
+          path
+        );
+      } catch {
+        setActionError('Failed to save hospital. Check admin permissions and field values.');
+      }
     } finally {
       setIsSavingHospital(false);
     }
   };
 
   const handleToggleVerified = async (h: HospitalItem) => {
+    setActionError(null);
     const path = `hospitals/${h.id}`;
     try {
       await updateDoc(doc(db, 'hospitals', h.id), {
@@ -297,16 +326,25 @@ export function AdminPanel({
         updatedAt: serverTimestamp(),
       });
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, path);
+      try {
+        handleFirestoreError(err, OperationType.UPDATE, path);
+      } catch {
+        setActionError('Could not update verification status.');
+      }
     }
   };
 
   const handleDeleteHospital = async (hospitalId: string) => {
+    setActionError(null);
     const path = `hospitals/${hospitalId}`;
     try {
       await deleteDoc(doc(db, 'hospitals', hospitalId));
     } catch (err) {
-      handleFirestoreError(err, OperationType.DELETE, path);
+      try {
+        handleFirestoreError(err, OperationType.DELETE, path);
+      } catch {
+        setActionError('Could not delete hospital record.');
+      }
     }
   };
 
@@ -314,14 +352,20 @@ export function AdminPanel({
     dispatchId: string,
     status: DispatchStatus
   ) => {
+    setActionError(null);
     const path = `emergencyDispatches/${dispatchId}`;
     try {
       await updateDoc(doc(db, 'emergencyDispatches', dispatchId), {
         status,
         updatedAt: serverTimestamp(),
       });
+      trackEvent('admin_dispatch_status_updated', { new_status: status });
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, path);
+      try {
+        handleFirestoreError(err, OperationType.UPDATE, path);
+      } catch {
+        setActionError('Could not update dispatch status.');
+      }
     }
   };
 
@@ -445,6 +489,22 @@ export function AdminPanel({
               </span>
             </button>
           </div>
+
+          {actionError && (
+            <div
+              role="alert"
+              className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-xs font-semibold text-red-800 flex items-center justify-between gap-2"
+            >
+              <span>{actionError}</span>
+              <button
+                type="button"
+                onClick={() => setActionError(null)}
+                className="font-bold hover:underline cursor-pointer"
+              >
+                ×
+              </button>
+            </div>
+          )}
 
           {actionMsg && (
             <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3 text-xs font-semibold text-emerald-900 flex items-center gap-2">

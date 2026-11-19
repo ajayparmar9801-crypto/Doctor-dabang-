@@ -18,14 +18,30 @@ const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT) || 3000;
 
 function getAiClient(): GoogleGenAI {
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  if (!apiKey) {
+    throw new Error('MISSING_GEMINI_API_KEY');
+  }
   return new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY,
+    apiKey,
     httpOptions: {
       headers: {
         'User-Agent': 'aistudio-build',
       },
     },
   });
+}
+
+function getPrivateMapsApiKey(): string {
+  return (
+    process.env.GOOGLE_MAPS_API_KEY?.trim() ||
+    process.env.VITE_GOOGLE_MAPS_API_KEY?.trim() ||
+    ''
+  );
+}
+
+function redactSecrets(text: string): string {
+  return text.replace(/AIza[0-9A-Za-z_-]{20,}/g, '[REDACTED_KEY]');
 }
 
 type SupportedLanguage = 'gu' | 'hi' | 'en' | 'es';
@@ -104,27 +120,198 @@ function buildLiveVoiceInstruction(
     .join(' ');
 }
 
-function extractGeminiError(err: unknown): { status: number; message: string } {
+function parseErrorBodyMessage(raw: string): { code?: number; status?: string; message?: string } {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith('{')) return {};
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      error?: { code?: number; status?: string; message?: string };
+      code?: number;
+      status?: string;
+      message?: string;
+    };
+    if (parsed.error) return parsed.error;
+    return parsed;
+  } catch {
+    return {};
+  }
+}
+
+function isRetryableGeminiError(err: unknown): boolean {
   const raw = err instanceof Error ? err.message : String(err);
-  if (raw.includes('PERMISSION_DENIED') || raw.includes('403')) {
+  const upper = raw.toUpperCase();
+  return (
+    upper.includes('503') ||
+    upper.includes('UNAVAILABLE') ||
+    upper.includes('HIGH DEMAND') ||
+    upper.includes('OVERLOADED') ||
+    upper.includes('429') ||
+    upper.includes('RESOURCE_EXHAUSTED') ||
+    upper.includes('ECONNRESET') ||
+    upper.includes('ETIMEDOUT') ||
+    upper.includes('UPSTREAM_TIMEOUT')
+  );
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(label)), ms);
+    promise.then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
+async function runWithGeminiFallback<T>(
+  primaryFn: () => Promise<T>,
+  fallbackFn?: () => Promise<T>
+): Promise<T> {
+  if (fallbackFn) {
+    try {
+      return await withTimeout(primaryFn(), 8000, 'UPSTREAM_TIMEOUT');
+    } catch (primaryErr) {
+      if (!isRetryableGeminiError(primaryErr)) {
+        throw primaryErr;
+      }
+      await sleep(300);
+      try {
+        return await withTimeout(fallbackFn(), 10000, 'UPSTREAM_TIMEOUT');
+      } catch (fallbackErr) {
+        if (!isRetryableGeminiError(fallbackErr)) {
+          throw fallbackErr;
+        }
+        await sleep(500);
+        return await withTimeout(fallbackFn(), 10000, 'UPSTREAM_TIMEOUT');
+      }
+    }
+  }
+
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await withTimeout(primaryFn(), 12000, 'UPSTREAM_TIMEOUT');
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryableGeminiError(err) || attempt === 1) {
+        break;
+      }
+      await sleep(450);
+    }
+  }
+  throw lastErr;
+}
+
+function extractGeminiError(err: unknown): { status: number; message: string } {
+  const raw = redactSecrets(err instanceof Error ? err.message : String(err));
+  const jsonInfo = parseErrorBodyMessage(raw);
+  const combinedUpper = `${raw} ${jsonInfo.status || ''} ${jsonInfo.message || ''}`.toUpperCase();
+
+  if (combinedUpper.includes('MISSING_GEMINI_API_KEY')) {
+    return {
+      status: 503,
+      message: 'Gemini API key is not configured on the server. Add GEMINI_API_KEY in Settings > Secrets.',
+    };
+  }
+  if (combinedUpper.includes('UPSTREAM_TIMEOUT')) {
+    return {
+      status: 504,
+      message: 'Doctor Dubang AI timed out due to heavy server load. Please retry in a moment or call 108/112 immediately.',
+    };
+  }
+  if (
+    combinedUpper.includes('API_KEY_INVALID') ||
+    combinedUpper.includes('API KEY EXPIRED') ||
+    combinedUpper.includes('API KEY NOT VALID') ||
+    combinedUpper.includes('REVOKED') ||
+    combinedUpper.includes('PERMISSION_DENIED') ||
+    jsonInfo.code === 403 ||
+    combinedUpper.includes('403')
+  ) {
     return {
       status: 403,
-      message: 'API access denied. Please verify GEMINI_API_KEY in Settings > Secrets.',
+      message: 'Server API key is invalid, revoked, or restricted. Please update GEMINI_API_KEY in Settings > Secrets.',
     };
   }
-  if (raw.includes('API_KEY_INVALID') || raw.includes('400')) {
+  if (jsonInfo.code === 400 || combinedUpper.includes('INVALID_ARGUMENT')) {
     return {
       status: 400,
-      message: 'Invalid Gemini request or API key. Please check Settings > Secrets.',
+      message: jsonInfo.message || 'Invalid AI request parameters. Please check Settings > Secrets.',
     };
   }
-  if (raw.includes('RESOURCE_EXHAUSTED') || raw.includes('429')) {
+  if (
+    jsonInfo.code === 429 ||
+    combinedUpper.includes('RESOURCE_EXHAUSTED') ||
+    combinedUpper.includes('429')
+  ) {
     return {
       status: 429,
-      message: 'Rate limit reached. Please wait a moment and try again.',
+      message: 'AI rate limit reached. Please wait a few seconds and try again.',
     };
   }
-  return { status: 500, message: raw || 'Failed to reach Doctor Dubang AI service.' };
+  if (
+    jsonInfo.code === 503 ||
+    combinedUpper.includes('UNAVAILABLE') ||
+    combinedUpper.includes('HIGH DEMAND') ||
+    combinedUpper.includes('503')
+  ) {
+    return {
+      status: 503,
+      message: 'Doctor Dubang AI is experiencing temporary high demand. Please retry in a few seconds or call 108/112 in an emergency.',
+    };
+  }
+  if (jsonInfo.code === 404 || combinedUpper.includes('NOT_FOUND')) {
+    return {
+      status: 502,
+      message: 'Configured AI model could not be reached. Please try again shortly.',
+    };
+  }
+
+  return {
+    status: 500,
+    message: jsonInfo.message || raw || 'Failed to reach Doctor Dubang AI service.',
+  };
+}
+
+function formatMapsProxyError(
+  httpStatus: number,
+  apiError?: { status?: string; message?: string }
+): { status: number; quotaExceeded?: boolean; keyIssue?: boolean; error: string } {
+  const rawMsg = redactSecrets(apiError?.message || '');
+  const upper = `${rawMsg} ${apiError?.status || ''}`.toUpperCase();
+
+  if (httpStatus === 429 || apiError?.status === 'RESOURCE_EXHAUSTED') {
+    return {
+      status: 429,
+      quotaExceeded: true,
+      error: 'Google Maps Platform quota reached. You can still view verified centers and open Google Maps links.',
+    };
+  }
+  if (
+    httpStatus === 403 ||
+    upper.includes('PERMISSION_DENIED') ||
+    upper.includes('API_KEY') ||
+    upper.includes('REVOKED') ||
+    upper.includes('EXPIRED')
+  ) {
+    return {
+      status: 403,
+      keyIssue: true,
+      error: 'Google Maps server key is revoked, restricted, or unauthorized. Verified clinic directory and direct Google Maps links remain active.',
+    };
+  }
+  return {
+    status: httpStatus >= 400 ? httpStatus : 502,
+    error: rawMsg || 'Unable to load Google hospital places right now.',
+  };
 }
 
 async function startServer() {
@@ -132,25 +319,20 @@ async function startServer() {
   app.use(express.json({ limit: '12mb' }));
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, service: 'doctor-dubang' });
-  });
-
-  app.get('/api/maps/config', (_req, res) => {
-    const mapsApiKey =
-      process.env.VITE_GOOGLE_MAPS_API_KEY ||
-      process.env.GOOGLE_MAPS_API_KEY ||
-      '';
-    res.json({ mapsApiKey });
+    res.json({
+      ok: true,
+      service: 'doctor-dubang',
+      aiConfigured: Boolean(process.env.GEMINI_API_KEY?.trim()),
+      mapsConfigured: Boolean(getPrivateMapsApiKey()),
+    });
   });
 
   app.post('/api/hospitals/nearby', async (req, res) => {
     try {
-      const apiKey =
-        process.env.GOOGLE_MAPS_API_KEY ||
-        process.env.VITE_GOOGLE_MAPS_API_KEY ||
-        '';
+      const apiKey = getPrivateMapsApiKey();
       if (!apiKey) {
         res.status(503).json({
+          keyIssue: true,
           error: 'Google Maps API key is not configured on the server.',
         });
         return;
@@ -225,21 +407,9 @@ async function startServer() {
         error?: { status?: string; message?: string };
       };
 
-      if (
-        response.status === 429 ||
-        data.error?.status === 'RESOURCE_EXHAUSTED'
-      ) {
-        res.status(429).json({
-          quotaExceeded: true,
-          error: data.error?.message || 'Google Maps Platform quota exceeded.',
-        });
-        return;
-      }
-
       if (!response.ok) {
-        res.status(response.status).json({
-          error: data.error?.message || 'Failed to fetch nearby Google hospitals.',
-        });
+        const mapped = formatMapsProxyError(response.status, data.error);
+        res.status(mapped.status).json(mapped);
         return;
       }
 
@@ -266,19 +436,19 @@ async function startServer() {
       res.json({ hospitals });
     } catch (err) {
       res.status(500).json({
-        error: err instanceof Error ? err.message : 'Unable to fetch nearby hospitals.',
+        error: redactSecrets(
+          err instanceof Error ? err.message : 'Unable to fetch nearby hospitals.'
+        ),
       });
     }
   });
 
   app.post('/api/hospitals/search', async (req, res) => {
     try {
-      const apiKey =
-        process.env.GOOGLE_MAPS_API_KEY ||
-        process.env.VITE_GOOGLE_MAPS_API_KEY ||
-        '';
+      const apiKey = getPrivateMapsApiKey();
       if (!apiKey) {
         res.status(503).json({
+          keyIssue: true,
           error: 'Google Maps API key is not configured on the server.',
         });
         return;
@@ -352,21 +522,9 @@ async function startServer() {
         error?: { status?: string; message?: string };
       };
 
-      if (
-        response.status === 429 ||
-        data.error?.status === 'RESOURCE_EXHAUSTED'
-      ) {
-        res.status(429).json({
-          quotaExceeded: true,
-          error: data.error?.message || 'Google Maps Platform quota exceeded.',
-        });
-        return;
-      }
-
       if (!response.ok) {
-        res.status(response.status).json({
-          error: data.error?.message || 'Google Places search failed.',
-        });
+        const mapped = formatMapsProxyError(response.status, data.error);
+        res.status(mapped.status).json(mapped);
         return;
       }
 
@@ -393,7 +551,9 @@ async function startServer() {
       res.json({ hospitals });
     } catch (err) {
       res.status(500).json({
-        error: err instanceof Error ? err.message : 'Unable to search hospitals.',
+        error: redactSecrets(
+          err instanceof Error ? err.message : 'Unable to search hospitals.'
+        ),
       });
     }
   });
@@ -433,28 +593,42 @@ async function startServer() {
         `Write the brief clearly in ${langName} (and include key clinical labels so ER/paramedic staff understand immediately). Keep it under 120 words, structured and urgent.`,
       ].join('\n');
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents: prompt,
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              dispatchBrief: {
-                type: Type.STRING,
-                description: 'Concise emergency pre-arrival hospital notification brief.',
-              },
-              urgencyLevel: {
-                type: Type.STRING,
-                description: 'One of: critical, high, moderate',
-              },
-            },
-            required: ['dispatchBrief', 'urgencyLevel'],
+      const responseSchema = {
+        type: Type.OBJECT,
+        properties: {
+          dispatchBrief: {
+            type: Type.STRING,
+            description: 'Concise emergency pre-arrival hospital notification brief.',
+          },
+          urgencyLevel: {
+            type: Type.STRING,
+            description: 'One of: critical, high, moderate',
           },
         },
-      });
+        required: ['dispatchBrief', 'urgencyLevel'],
+      };
+
+      const response = await runWithGeminiFallback(
+        () =>
+          ai.models.generateContent({
+            model: 'gemini-4-hydrogen',
+            contents: prompt,
+            config: {
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              responseMimeType: 'application/json',
+              responseSchema,
+            },
+          }),
+        () =>
+          ai.models.generateContent({
+            model: 'gemini-3.1-flash-lite',
+            contents: prompt,
+            config: {
+              responseMimeType: 'application/json',
+              responseSchema,
+            },
+          })
+      );
 
       const raw = (response.text || '{}').trim();
       const parsed = JSON.parse(raw) as {
@@ -513,14 +687,31 @@ async function startServer() {
         },
       ];
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents,
-        config: {
-          systemInstruction: buildDoctorSystemInstruction(language, medicalId, locationText),
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-        },
-      });
+      const systemInstruction = buildDoctorSystemInstruction(
+        language,
+        medicalId,
+        locationText
+      );
+
+      const response = await runWithGeminiFallback(
+        () =>
+          ai.models.generateContent({
+            model: 'gemini-4-hydrogen',
+            contents,
+            config: {
+              systemInstruction,
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            },
+          }),
+        () =>
+          ai.models.generateContent({
+            model: 'gemini-3.1-flash-lite',
+            contents,
+            config: {
+              systemInstruction,
+            },
+          })
+      );
 
       const reply = response.text?.trim();
       if (!reply) {
@@ -545,30 +736,32 @@ async function startServer() {
 
       const cleanText = text.replace(/[*#_`]/g, '').trim().slice(0, 1200);
       const ai = getAiClient();
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash-lite-tts',
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              {
-                text: cleanText,
-                speechMetadata: {
-                  style: 'Calm, reassuring, clear emergency physician giving first-aid guidance',
+      const response = await runWithGeminiFallback(() =>
+        ai.models.generateContent({
+          model: 'gemini-3.8-flash-lite-tts',
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: cleanText,
+                  speechMetadata: {
+                    style: 'Calm, reassuring, clear emergency physician giving first-aid guidance',
+                  },
                 },
+              ],
+            },
+          ],
+          config: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: 'Charon' },
               },
-            ],
-          },
-        ],
-        config: {
-          responseModalities: ['AUDIO'],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: 'Charon' },
             },
           },
-        },
-      });
+        })
+      );
 
       const base64Audio =
         response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
@@ -600,22 +793,24 @@ async function startServer() {
 
       const ai = getAiClient();
       const langName = getLanguageName(language);
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.5-transcribe',
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                mimeType,
-                data: audioBase64,
+      const response = await runWithGeminiFallback(() =>
+        ai.models.generateContent({
+          model: 'gemini-3.5-transcribe',
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType,
+                  data: audioBase64,
+                },
               },
-            },
-            {
-              text: `Transcribe the spoken emergency message accurately. Preferred language context: ${langName}. Return only the transcribed text without extra commentary.`,
-            },
-          ],
-        },
-      });
+              {
+                text: `Transcribe the spoken emergency message accurately. Preferred language context: ${langName}. Return only the transcribed text without extra commentary.`,
+              },
+            ],
+          },
+        })
+      );
 
       const transcript = response.text?.trim() ?? '';
       res.json({ transcript });
@@ -705,10 +900,11 @@ async function startServer() {
           },
           onerror: (err) => {
             if (clientWs.readyState === WebSocket.OPEN) {
+              const parsed = extractGeminiError(err);
               clientWs.send(
                 JSON.stringify({
                   type: 'error',
-                  message: err instanceof Error ? err.message : 'Voice stream error.',
+                  message: parsed.message,
                 })
               );
             }

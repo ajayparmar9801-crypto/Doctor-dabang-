@@ -17,6 +17,7 @@ import type {
   QuickSymptom,
 } from '../types';
 import type { TranslationBundle } from '../i18n/translations';
+import { trackEvent } from '../utils/analytics';
 
 interface DoctorDubangAssistantProps {
   language: Language;
@@ -133,6 +134,7 @@ export function DoctorDubangAssistant({
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const liveUserTranscriptRef = useRef<string>('');
   const liveBotTranscriptRef = useRef<string>('');
+  const voiceCallStartedAtRef = useRef<number | null>(null);
 
   // Keep welcome message localized if user switches language before chatting
   useEffect(() => {
@@ -175,6 +177,7 @@ export function DoctorDubangAssistant({
     }
     stopTtsAudio();
     setPlayingMsgId(msgId);
+    trackEvent('ai_tts_played', { app_language: language });
     try {
       const res = await fetch('/api/first-aid/tts', {
         method: 'POST',
@@ -201,12 +204,21 @@ export function DoctorDubangAssistant({
     }
   };
 
-  const sendMessage = async (overrideText?: string) => {
+  const sendMessage = async (
+    overrideText?: string,
+    inputSource: 'text' | 'quick_symptom' | 'voice_clip' = 'text'
+  ) => {
     const trimmed = (overrideText ?? inputText).trim();
     if (!trimmed || isSending) return;
 
     setErrorText(null);
     if (!overrideText) setInputText('');
+
+    const startedAt = Date.now();
+    trackEvent('ai_chat_message_sent', {
+      input_method: inputSource,
+      app_language: language,
+    });
 
     const userMsg: ChatMessage = {
       id: `u-${Date.now()}`,
@@ -250,11 +262,16 @@ export function DoctorDubangAssistant({
         timestamp: formatTime(),
       };
       setMessages((prev) => [...prev, botMsg]);
+      trackEvent('ai_chat_response_received', {
+        app_language: language,
+        response_time_ms: Date.now() - startedAt,
+      });
 
       if (autoReadAloud) {
         void playMessageTts(botMsg.id, botMsg.text);
       }
     } catch (err) {
+      trackEvent('ai_chat_error', { app_language: language });
       setErrorText(
         err instanceof Error ? err.message : 'Failed to connect to Doctor Dubang.'
       );
@@ -322,7 +339,7 @@ export function DoctorDubangAssistant({
           const data = (await res.json()) as { transcript?: string; error?: string };
           if (!res.ok) throw new Error(data.error || 'Transcription failed.');
           if (data.transcript?.trim()) {
-            await sendMessage(data.transcript.trim());
+            await sendMessage(data.transcript.trim(), 'voice_clip');
           }
         } catch (err) {
           setErrorText(
@@ -409,6 +426,17 @@ export function DoctorDubangAssistant({
       wsRef.current.close();
       wsRef.current = null;
     }
+    if (voiceCallStartedAtRef.current) {
+      const durationSec = Math.max(
+        1,
+        Math.round((Date.now() - voiceCallStartedAtRef.current) / 1000)
+      );
+      trackEvent('ai_voice_call_ended', {
+        duration_seconds: durationSec,
+        app_language: language,
+      });
+      voiceCallStartedAtRef.current = null;
+    }
     liveUserTranscriptRef.current = '';
     liveBotTranscriptRef.current = '';
     setLiveCaption('');
@@ -468,6 +496,8 @@ export function DoctorDubangAssistant({
 
           if (msg.type === 'ready') {
             setVoiceCallState('active');
+            voiceCallStartedAtRef.current = Date.now();
+            trackEvent('ai_voice_call_started', { app_language: language });
             const source = inputCtx.createMediaStreamSource(stream);
             const processor = inputCtx.createScriptProcessor(4096, 1, 1);
             processorRef.current = processor;
@@ -666,7 +696,13 @@ export function DoctorDubangAssistant({
             key={symptom.id}
             type="button"
             disabled={isSending}
-            onClick={() => void sendMessage(t[symptom.labelKey])}
+            onClick={() => {
+              trackEvent('quick_symptom_tapped', {
+                symptom_id: symptom.id,
+                app_language: language,
+              });
+              void sendMessage(t[symptom.labelKey], 'quick_symptom');
+            }}
             className="min-h-[36px] whitespace-nowrap shrink-0 bg-white hover:bg-red-50 hover:border-red-300 hover:text-red-800 border border-slate-300 text-slate-800 text-xs font-medium px-3 py-1.5 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
           >
             {t[symptom.labelKey]}

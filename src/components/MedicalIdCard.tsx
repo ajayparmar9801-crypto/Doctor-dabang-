@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { CheckCircle2, CreditCard, Edit3, Phone, Save } from 'lucide-react';
 import type { MedicalID } from '../types';
 import type { TranslationBundle } from '../i18n/translations';
+import { trackEvent } from '../utils/analytics';
 
 interface MedicalIdCardProps {
   medicalId: MedicalID;
@@ -31,6 +32,12 @@ export function MedicalIdCard({ medicalId, onSave, t }: MedicalIdCardProps) {
       updatedAt: new Date().toISOString(),
     };
     onSave(cleaned);
+    trackEvent('medical_id_saved', {
+      has_name: Boolean(cleaned.name),
+      has_blood_group: Boolean(cleaned.bloodGroup),
+      has_contact: Boolean(cleaned.emergencyContact),
+      has_allergies: Boolean(cleaned.allergies),
+    });
     setIsEditing(false);
     setSavedToast(true);
     setTimeout(() => setSavedToast(false), 3000);
